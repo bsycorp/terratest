@@ -1,9 +1,14 @@
 package k8s
 
 import (
-	"testing"
-
 	"k8s.io/client-go/kubernetes"
+	restclient "k8s.io/client-go/rest"
+	"k8s.io/client-go/transport"
+	"net"
+	"net/http"
+	"net/url"
+	"testing"
+	"time"
 
 	// The following line loads the gcp plugin which is required to authenticate against GKE clusters.
 	// See: https://github.com/kubernetes/client-go/issues/242
@@ -36,6 +41,43 @@ func GetKubernetesClientFromOptionsE(t *testing.T, options *KubectlOptions) (*ku
 	config, err := LoadApiClientConfigE(kubeConfigPath, options.ContextName)
 	if err != nil {
 		return nil, err
+	}
+
+	if options.Env["https_proxy"] != "" {
+		// TODO: Consider using golang's no_proxy support to test for exclusion to kube API server.
+		// TODO: This is making a new transport every time we get a new kubernetes client. Not ideal.
+		proxyURL, err := url.Parse(options.Env["https_proxy"])
+		if err != nil {
+			return nil, err
+		}
+		logger.Logf(t, "Using proxy: %v", proxyURL)
+
+		// Overwrite TLS-related fields from config to avoid collision with
+		// Transport field. For more information, see:
+		// * https://github.com/kubernetes/client-go/issues/452
+		//
+
+		transportConfig, err := config.TransportConfig()
+		if err != nil {
+			return nil, err
+		}
+		tlsConfig, err := transport.TLSConfigFor(transportConfig)
+		if err != nil {
+			return nil, err
+		}
+		config.Transport = &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+			TLSClientConfig: tlsConfig,
+			TLSHandshakeTimeout: 10 * time.Second,
+			MaxIdleConnsPerHost: 100,
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+		}
+		config.WrapTransport = transportConfig.WrapTransport
+		config.Dial	= transportConfig.Dial
+		config.TLSClientConfig = restclient.TLSClientConfig{}
 	}
 
 	clientset, err := kubernetes.NewForConfig(config)
